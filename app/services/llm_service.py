@@ -4,6 +4,8 @@ configurado (OpenAI o Anthropic) para generar una estimacion de software.
 """
 
 from dataclasses import dataclass
+from typing import Iterator
+import time
 
 from app.config import Settings, get_settings
 from app.context.examples import get_examples_as_text
@@ -37,7 +39,12 @@ class EstimationResult:
     provider: str
 
 
-def _build_system_prompt() -> str:
+def build_system_prompt() -> str:
+    """
+    Construye el system prompt CAG (rol del modelo + ejemplos estaticos).
+    Es publica porque tanto el endpoint REST como la interfaz de Streamlit
+    la usan (esta ultima para mostrarla en el panel lateral de contexto).
+    """
     return SYSTEM_PROMPT_TEMPLATE.format(examples=get_examples_as_text())
 
 
@@ -52,7 +59,7 @@ def _call_openai(transcription: str, settings: Settings) -> EstimationResult:
     response = client.chat.completions.create(
         model=settings.openai_model,
         messages=[
-            {"role": "system", "content": _build_system_prompt()},
+            {"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": transcription},
         ],
         temperature=0.4,
@@ -92,7 +99,7 @@ def _call_openrouter(transcription: str, settings: Settings) -> EstimationResult
     response = client.chat.completions.create(
         model=settings.openrouter_model,
         messages=[
-            {"role": "system", "content": _build_system_prompt()},
+            {"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": transcription},
         ],
         temperature=0.4,
@@ -119,7 +126,7 @@ def _call_anthropic(transcription: str, settings: Settings) -> EstimationResult:
     response = client.messages.create(
         model=settings.anthropic_model,
         max_tokens=1500,
-        system=_build_system_prompt(),
+        system=build_system_prompt(),
         messages=[
             {"role": "user", "content": transcription},
         ],
@@ -151,5 +158,142 @@ def generate_estimation(transcription: str) -> EstimationResult:
         return _call_anthropic(transcription, settings)
     elif settings.llm_provider == "openrouter":
         return _call_openrouter(transcription, settings)
+    else:
+        raise ValueError(f"Proveedor LLM no soportado: {settings.llm_provider}")
+
+
+# ---------------------------------------------------------------------------
+# Streaming: usado por la interfaz de Streamlit (st.write_stream).
+#
+# Cada funcion es un generador que va cediendo (yield) fragmentos de texto a
+# medida que el modelo los produce. Ademas, escriben metricas de la llamada
+# (modelo, tokens de entrada/salida, tiempo de respuesta) en el diccionario
+# `stats` que recibe como parametro, para que el caller pueda leerlas una vez
+# el streaming termina (un generador no puede "return" datos junto al ultimo
+# yield de forma comoda, asi que usamos este dict mutable como salida lateral).
+# ---------------------------------------------------------------------------
+
+
+def _stream_openai_compatible(
+    transcription: str,
+    stats: dict,
+    *,
+    api_key: str,
+    model: str,
+    provider_name: str,
+    base_url: str | None = None,
+    extra_headers: dict | None = None,
+) -> Iterator[str]:
+    """
+    Streaming compartido para OpenAI y OpenRouter (API compatible con la de
+    OpenAI). Usa `stream_options={"include_usage": True}` para recibir el
+    conteo de tokens en el ultimo chunk del stream.
+    """
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+
+    start = time.perf_counter()
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": transcription},
+        ],
+        temperature=0.4,
+        stream=True,
+        stream_options={"include_usage": True},
+        extra_headers=extra_headers or None,
+    )
+
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+        # El chunk final (sin choices) trae el resumen de uso de tokens.
+        usage = getattr(chunk, "usage", None)
+        if usage:
+            stats["input_tokens"] = usage.prompt_tokens
+            stats["output_tokens"] = usage.completion_tokens
+
+    stats["model"] = model
+    stats["provider"] = provider_name
+    stats["elapsed_seconds"] = round(time.perf_counter() - start, 2)
+
+
+def _stream_openai(transcription: str, settings: Settings, stats: dict) -> Iterator[str]:
+    if not settings.openai_api_key:
+        raise ValueError("OPENAI_API_KEY no esta configurada en el .env")
+    yield from _stream_openai_compatible(
+        transcription,
+        stats,
+        api_key=settings.openai_api_key,
+        model=settings.openai_model,
+        provider_name="openai",
+    )
+
+
+def _stream_openrouter(transcription: str, settings: Settings, stats: dict) -> Iterator[str]:
+    if not settings.openrouter_api_key:
+        raise ValueError("OPENROUTER_API_KEY no esta configurada en el .env")
+
+    extra_headers = {}
+    if settings.openrouter_site_url:
+        extra_headers["HTTP-Referer"] = settings.openrouter_site_url
+    if settings.openrouter_site_name:
+        extra_headers["X-Title"] = settings.openrouter_site_name
+
+    yield from _stream_openai_compatible(
+        transcription,
+        stats,
+        api_key=settings.openrouter_api_key,
+        model=settings.openrouter_model,
+        provider_name="openrouter",
+        base_url=settings.openrouter_base_url,
+        extra_headers=extra_headers,
+    )
+
+
+def _stream_anthropic(transcription: str, settings: Settings, stats: dict) -> Iterator[str]:
+    from anthropic import Anthropic
+
+    if not settings.anthropic_api_key:
+        raise ValueError("ANTHROPIC_API_KEY no esta configurada en el .env")
+
+    client = Anthropic(api_key=settings.anthropic_api_key)
+
+    start = time.perf_counter()
+    with client.messages.stream(
+        model=settings.anthropic_model,
+        max_tokens=1500,
+        system=build_system_prompt(),
+        messages=[{"role": "user", "content": transcription}],
+    ) as stream:
+        for text in stream.text_stream:
+            yield text
+        final_message = stream.get_final_message()
+        stats["input_tokens"] = final_message.usage.input_tokens
+        stats["output_tokens"] = final_message.usage.output_tokens
+
+    stats["model"] = settings.anthropic_model
+    stats["provider"] = "anthropic"
+    stats["elapsed_seconds"] = round(time.perf_counter() - start, 2)
+
+
+def stream_estimation(transcription: str, stats: dict) -> Iterator[str]:
+    """
+    Version en streaming de `generate_estimation`, usada por streamlit_app.py.
+
+    Cede fragmentos de texto a medida que el LLM los genera y, al terminar,
+    deja las metricas de la llamada (modelo, proveedor, tokens, tiempo de
+    respuesta) escritas en el dict `stats` pasado por el caller.
+    """
+    settings = get_settings()
+
+    if settings.llm_provider == "openai":
+        yield from _stream_openai(transcription, settings, stats)
+    elif settings.llm_provider == "anthropic":
+        yield from _stream_anthropic(transcription, settings, stats)
+    elif settings.llm_provider == "openrouter":
+        yield from _stream_openrouter(transcription, settings, stats)
     else:
         raise ValueError(f"Proveedor LLM no soportado: {settings.llm_provider}")

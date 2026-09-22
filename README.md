@@ -17,9 +17,10 @@ estimador-cag/
 │   ├── routers/
 │   │   └── estimations.py      # POST /api/v1/estimate
 │   ├── services/
-│   │   └── llm_service.py      # Construcción del prompt CAG + llamada al LLM
+│   │   └── llm_service.py      # Prompt CAG + llamadas (sync y streaming) al LLM
 │   └── context/
 │       └── examples.py         # Ejemplos estáticos (few-shot) inyectados en el prompt
+├── streamlit_app.py            # Interfaz de chat (Streamlit), con streaming
 ├── scripts/
 │   └── verify.sh               # Valida estructura + arranca el server + prueba /health y /estimate
 ├── sample_data/
@@ -83,7 +84,41 @@ estimador-cag/
 
    O abre Swagger UI en [http://localhost:8000/docs](http://localhost:8000/docs).
 
-## Verificación automática
+## Interfaz de chat (Streamlit)
+
+Además del endpoint REST, el proyecto incluye una interfaz conversacional
+para no depender de `curl`/Postman/Swagger:
+
+```bash
+uv run streamlit run streamlit_app.py
+```
+
+Esto abre `http://localhost:8501` en el navegador. Pegás la transcripción de
+una reunión en el chat y la estimación se va mostrando en streaming, token a
+token, a medida que el modelo la genera.
+
+Qué incluye:
+
+- **Historial persistente** durante la sesión (`st.session_state`), podés
+  encadenar varias transcripciones sin perder el contexto visual del chat.
+- **Streaming real**, no simulado: usa `st.write_stream` sobre un generador
+  (`stream_estimation` en `llm_service.py`) que reenvía los chunks tal como
+  los va devolviendo el proveedor (OpenAI, Anthropic u OpenRouter).
+- **Panel lateral con el contexto CAG**: el system prompt activo y los
+  ejemplos estáticos inyectados, para que se vea exactamente qué está
+  "sabiendo" el modelo al generar cada estimación.
+- **Métricas de la última llamada**: proveedor, modelo, tokens de entrada y
+  salida, y tiempo de respuesta.
+- La API key se lee siempre desde `.env` (vía `app/config.py`), igual que en
+  el endpoint REST — nunca está hardcodeada en `streamlit_app.py`.
+
+> Si en algún momento deployás esto en Streamlit Community Cloud, podés
+> reemplazar el `.env` por `st.secrets` sin tocar `streamlit_app.py`: alcanza
+> con que `app/config.py` lea también `st.secrets` como fuente adicional, o
+> con exportar esas mismas variables como "Secrets" en la configuración de la
+> app en Streamlit Cloud.
+
+
 
 `scripts/verify.sh` valida que la estructura de carpetas esperada exista,
 instala dependencias, levanta el servidor en background, y prueba
