@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     app_name: str = "Estimador CAG"
     app_env: str = "development"
 
+    # Cliente (Streamlit): URL base del servicio IA (FastAPI) al que llama.
+    api_base_url: str = "http://localhost:8000"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

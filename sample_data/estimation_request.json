@@ -1,0 +1,6 @@
+{
+  "description": "Necesitamos una app móvil de delivery de comida con seguimiento en tiempo real del repartidor y pagos integrados con tarjeta.",
+  "project_type": "mobile_app",
+  "detail_level": "detailed",
+  "output_format": "phases_table"
+}

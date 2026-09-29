@@ -1,101 +1,133 @@
 """
-Interfaz conversacional (Streamlit) para el Estimador CAG.
+Cliente (Streamlit) del Estimador CAG.
 
-Reutiliza exactamente la misma logica de construccion de prompt y llamada al
-LLM que el endpoint FastAPI (`app/services/llm_service.py`), asi que ambas
-interfaces (REST y chat) comparten el mismo comportamiento CAG.
+Ya no es un chat: es un formulario tipado. El espacio de tareas es acotado
+(tipo de proyecto, nivel de detalle, formato de salida) asi que un
+formulario produce mejor producto que un textarea libre — evita ambiguedad
+en la entrada y deja que el prompt (no el usuario) decida como pedirle la
+estimacion al modelo.
 
-Ejecutar con:
-    uv run streamlit run streamlit_app.py
+El formulario arma un EstimationRequest y hace POST /api/v1/estimate contra
+el servicio IA (FastAPI) via HTTP — cliente y servicio son procesos
+separados que se comunican por API, no un import directo.
+
+Ejecutar (en dos terminales):
+    uv run uvicorn app.main:app --reload          # servicio IA
+    uv run streamlit run streamlit_app.py          # cliente
 """
 
+import requests
 import streamlit as st
 
 from app.config import get_settings
-from app.context.examples import ESTIMATION_EXAMPLES, get_examples_as_text
-from app.services.llm_service import build_system_prompt, stream_estimation
+from app.schemas import DetailLevel, EstimationRequest, OutputFormat, ProjectType
 
-st.set_page_config(page_title="Estimador CAG", page_icon="🧮", layout="wide")
+st.set_page_config(page_title="Estimador CAG", page_icon="🧮", layout="centered")
 
 settings = get_settings()
 
-# -----------------------------------------------------------------------
-# Nivel 3 (opcional): panel lateral con el contexto CAG activo y metricas
-# de la ultima llamada al modelo.
-# -----------------------------------------------------------------------
-with st.sidebar:
-    st.header("🧠 Contexto CAG")
-    st.caption(
-        "Esto es exactamente lo que se inyecta en el prompt antes de cada "
-        "estimacion — el mismo contexto estatico que usa el endpoint REST."
-    )
+PROJECT_TYPE_LABELS = {
+    ProjectType.MOBILE_APP: "App móvil",
+    ProjectType.WEB_SAAS: "Web / SaaS",
+    ProjectType.INTERNAL_TOOL: "Herramienta interna",
+    ProjectType.DATA_PIPELINE: "Pipeline de datos",
+}
 
-    with st.expander("System prompt activo", expanded=False):
-        st.text(build_system_prompt())
+DETAIL_LEVEL_LABELS = {
+    DetailLevel.SUMMARY: "Resumen (solo totales)",
+    DetailLevel.MEDIUM: "Medio (por fase)",
+    DetailLevel.DETAILED: "Detallado (por fase y tarea)",
+}
 
-    with st.expander(
-        f"Ejemplos de estimaciones inyectados ({len(ESTIMATION_EXAMPLES)})",
-        expanded=False,
-    ):
-        st.markdown(get_examples_as_text())
+OUTPUT_FORMAT_LABELS = {
+    OutputFormat.PHASES_TABLE: "Tabla de fases",
+    OutputFormat.LINE_ITEMS: "Líneas de trabajo (line items)",
+    OutputFormat.NARRATIVE: "Narrativo",
+}
 
-    st.divider()
-    st.subheader("📊 Última llamada")
-
-    last_stats = st.session_state.get("last_stats")
-    if last_stats:
-        st.markdown(f"**Proveedor:** `{last_stats.get('provider', '—')}`")
-        st.markdown(f"**Modelo:** `{last_stats.get('model', '—')}`")
-        col_in, col_out = st.columns(2)
-        col_in.metric("Tokens entrada", last_stats.get("input_tokens", "—"))
-        col_out.metric("Tokens salida", last_stats.get("output_tokens", "—"))
-        st.metric("Tiempo de respuesta", f"{last_stats.get('elapsed_seconds', '—')} s")
-    else:
-        st.caption("Todavía no se hizo ninguna consulta en esta sesión.")
-
-# -----------------------------------------------------------------------
-# Nivel 1 + 2: chat con historial persistente y respuesta en streaming.
-# -----------------------------------------------------------------------
 st.title("🧮 Estimador CAG")
 st.caption(
-    f"Proveedor activo: **{settings.llm_provider}** · "
-    "Pegá la transcripción de una reunión y recibí una estimación de software."
+    "Completá el formulario con los parámetros del proyecto. "
+    "El servicio IA arma el prompt con templates versionados y genera la estimación."
 )
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+with st.sidebar:
+    st.header("⚙️ Configuración")
+    api_base_url = st.text_input("URL del servicio IA", value=settings.api_base_url)
+    prompt_version = st.text_input("Versión de prompt", value="v1")
+    st.caption(
+        "El servicio soporta múltiples versiones de prompt en paralelo "
+        "(`app/prompts/estimation/<version>/`). Cambiar esto no requiere "
+        "tocar código, solo el nombre de la carpeta de versión."
+    )
 
-# Repinta el historial existente en cada rerun de Streamlit.
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+with st.form("estimation_form"):
+    description = st.text_area(
+        "Descripción del proyecto",
+        placeholder=(
+            "Ej: Necesitamos una app móvil de delivery de comida con "
+            "seguimiento en tiempo real del repartidor y pagos integrados."
+        ),
+        height=150,
+        max_chars=2000,
+    )
 
-prompt = st.chat_input("Pegá acá la transcripción de la reunión...")
+    col1, col2 = st.columns(2)
+    with col1:
+        project_type = st.selectbox(
+            "Tipo de proyecto",
+            options=list(ProjectType),
+            format_func=lambda p: PROJECT_TYPE_LABELS[p],
+        )
+        detail_level = st.selectbox(
+            "Nivel de detalle",
+            options=list(DetailLevel),
+            format_func=lambda d: DETAIL_LEVEL_LABELS[d],
+            index=1,
+        )
+    with col2:
+        output_format = st.selectbox(
+            "Formato de salida",
+            options=list(OutputFormat),
+            format_func=lambda o: OUTPUT_FORMAT_LABELS[o],
+        )
 
-if prompt:
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    submitted = st.form_submit_button("Generar estimación", use_container_width=True)
 
-    with st.chat_message("assistant"):
-        stats: dict = {}
-        try:
-            # st.write_stream consume el generador, va renderizando cada
-            # fragmento a medida que llega (Nivel 2) y devuelve el texto
-            # completo acumulado al finalizar.
-            full_response = st.write_stream(stream_estimation(prompt, stats))
-        except ValueError as exc:
-            # Errores de configuracion: falta una API key, etc.
-            full_response = f"⚠️ Error de configuración: {exc}"
-            st.error(full_response)
-        except Exception as exc:  # noqa: BLE001
-            # Errores al llamar al proveedor del LLM (red, auth, rate limit...).
-            full_response = f"⚠️ Error llamando al proveedor LLM: {exc}"
-            st.error(full_response)
+if submitted:
+    if len(description.strip()) < 20:
+        st.error("La descripción debe tener al menos 20 caracteres.")
+    else:
+        # Construimos y validamos el request con el mismo schema Pydantic
+        # que usa el servicio, asi el error de validacion (si lo hay) se ve
+        # antes de salir de la maquina del cliente.
+        request = EstimationRequest(
+            description=description.strip(),
+            project_type=project_type,
+            detail_level=detail_level,
+            output_format=output_format,
+        )
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
-    if stats:
-        st.session_state.last_stats = stats
-        # Vuelve a correr el script para que el panel lateral (Nivel 3)
-        # muestre las metricas recien calculadas de esta llamada.
-        st.rerun()
+        with st.spinner("Generando estimación..."):
+            try:
+                response = requests.post(
+                    f"{api_base_url}/api/v1/estimate",
+                    params={"prompt_version": prompt_version},
+                    json=request.model_dump(mode="json"),
+                    timeout=60,
+                )
+                response.raise_for_status()
+                data = response.json()
+            except requests.exceptions.ConnectionError:
+                st.error(
+                    f"No se pudo conectar con el servicio IA en {api_base_url}. "
+                    "¿Está corriendo `uv run uvicorn app.main:app --reload`?"
+                )
+            except requests.exceptions.HTTPError:
+                detail = response.json().get("detail", response.text)
+                st.error(f"El servicio IA devolvió un error: {detail}")
+            except requests.exceptions.RequestException as exc:
+                st.error(f"Error inesperado llamando al servicio IA: {exc}")
+            else:
+                st.success(f"Estimación generada (prompt {data['prompt_version']})")
+                st.markdown(data["text"])
