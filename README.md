@@ -116,8 +116,18 @@ estimador-cag/
    | `OPENROUTER_MODEL`       | Modelo con prefijo de proveedor, ej. `anthropic/claude-3.5-haiku`   |
    | `OPENROUTER_BASE_URL`    | Por defecto `https://openrouter.ai/api/v1`                          |
    | `SESSION_MAX_TURNS`      | Turnos (pares user+assistant) que conserva la ventana deslizante (default `6`) |
-| `ATTACHMENT_MAX_CHARS`   | Máximo de caracteres de texto extraído por adjunto (default `20000`) |
-| `API_BASE_URL`           | URL del servicio IA que usa el cliente Streamlit (default `http://localhost:8000`) |
+   | `ATTACHMENT_MAX_CHARS`   | Máximo de caracteres de texto extraído por adjunto (default `20000`) |
+   | `API_BASE_URL`           | URL del servicio IA que usa el cliente Streamlit (default `http://localhost:8000`) |
+
+   > **Reiniciá el servicio después de editar el `.env`.** `pydantic-settings`
+   > lee el archivo al arrancar y `get_settings()` está memoizado con
+   > `lru_cache`: un proceso que ya estaba corriendo sigue usando los valores
+   > viejos. Por eso puede aparecer un `ANTHROPIC_API_KEY no esta configurada`
+   > con el `.env` ya completo — reiniciá `uvicorn` y se resuelve.
+   >
+   > Las variables **comentadas** en `.env` heredan el default de
+   > `app/config.py`; no las descomentes vacías (`LLM_PROVIDER=`) o el arranque
+   > falla con un `ValidationError` de pydantic.
 
 3. Arranca el **servicio IA** (FastAPI):
 
