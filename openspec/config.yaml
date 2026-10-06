@@ -1,0 +1,46 @@
+schema: spec-driven
+
+# Contexto del proyecto para los agentes de IA. Solo incluye restricciones que
+# un agente NO pueda inferir leyendo el codigo.
+context: |
+  Proyecto "Estimador CAG": servicio FastAPI + cliente Streamlit que generan
+  una estimacion de software a partir de una descripcion de proyecto, usando
+  arquitectura CAG (contexto estatico inyectado en el prompt).
+
+  Stack: Python >= 3.11 gestionado con `uv` (pyproject.toml + uv.lock).
+  Sin dependencias de Node en el runtime de la app.
+
+  Arquitectura y convenciones NO negociables:
+  - Los prompts viven SIEMPRE en templates Jinja2 versionados en
+    app/prompts/estimation/<version>/{system,user,examples}.j2. Nunca
+    hardcodear prompts en strings de Python.
+  - El endpoint expone `?prompt_version=` para elegir la version del prompt.
+    Una nueva version es una copia de la carpeta (v1 -> v2), sin tocar el
+    endpoint ni el loader.
+  - El contrato cliente<->servicio es el modelo Pydantic v2 en app/schemas.py
+    (EstimationRequest: description, project_type, detail_level, output_format;
+    EstimationResponse: text, prompt_version). Cliente y servicio son procesos
+    separados que se comunican por HTTP, no por import directo.
+  - El proveedor de LLM se selecciona con LLM_PROVIDER (openai|anthropic|
+    openrouter) via pydantic-settings (app/config.py). No hay llamadas reales
+    a APIs externas en los tests.
+  - Escribe todas las propuestas, specs, disenos y tareas en espanol.
+
+rules:
+  proposal:
+    - Indica explicitamente que queda fuera de alcance.
+    - Si el cambio toca un prompt, aclara si crea una version nueva (v2/) o
+      modifica una existente, y el impacto en el contrato tipado.
+  tasks:
+    - Termina con un paso para correr `uv run pytest`.
+    - Si cambia el render de un prompt, anade/actualiza un test en
+      tests/prompts/ (tests de render, sin llamar a ningun LLM).
+
+operations:
+  apply:
+    guidance:
+      - Ejecuta `uv run pytest` antes de dar una tarea por completada.
+      - No llames a APIs reales de LLM para verificar; usa tests de render.
+  archive:
+    guidance:
+      - Resume el resultado del archive y que specs se actualizaron.

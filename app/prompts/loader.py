@@ -74,3 +74,74 @@ def render_estimation_prompt(
     user = user_template.render(**context)
 
     return system, user
+
+
+# Version de prompt que usa el flujo conversacional (v2 introduce el bloque
+# <project_metadata>). v1 queda intacto para el endpoint transaccional.
+DEFAULT_SESSION_PROMPT_VERSION = "v2"
+
+# Claves de ProjectMetadata. Se pasan siempre (aunque sean None/vacio) para que
+# StrictUndefined no reviente y el bloque <project_metadata> pueda quedar vacio.
+_METADATA_KEYS = (
+    "project_name",
+    "assumed_team_size",
+    "mentioned_technologies",
+    "agreed_scope",
+)
+
+
+def _session_context(
+    project_metadata: dict | None, transcript: str
+) -> dict:
+    """Normaliza el contexto del flujo conversacional para los templates."""
+    metadata = {key: None for key in _METADATA_KEYS}
+    metadata["mentioned_technologies"] = []
+    if project_metadata:
+        for key in _METADATA_KEYS:
+            if key in project_metadata and project_metadata[key] is not None:
+                metadata[key] = project_metadata[key]
+    return {"project_metadata": metadata, "transcript": transcript}
+
+
+def _get_template(version: str, name: str):
+    env = _get_environment(version)
+    try:
+        return env.get_template(name)
+    except TemplateNotFound as exc:
+        raise ValueError(
+            f"Falta el template '{exc.name}' en la version de prompt '{version}'"
+        ) from exc
+
+
+def render_session_system_prompt(
+    project_metadata: dict | None,
+    version: str = DEFAULT_SESSION_PROMPT_VERSION,
+) -> str:
+    """
+    Renderiza el system prompt del flujo conversacional, inyectando el
+    `project_metadata` (la memoria del proyecto) en el bloque
+    `<project_metadata>`. Si esta vacio, el bloque sale vacio.
+    """
+    template = _get_template(version, "system.j2")
+    return template.render(**_session_context(project_metadata, ""))
+
+
+def render_session_user_prompt(
+    transcript: str,
+    version: str = DEFAULT_SESSION_PROMPT_VERSION,
+) -> str:
+    """Renderiza el user prompt del flujo conversacional para un turno."""
+    template = _get_template(version, "user.j2")
+    return template.render(**_session_context(None, transcript))
+
+
+def render_session_prompt(
+    project_metadata: dict | None,
+    transcript: str,
+    version: str = DEFAULT_SESSION_PROMPT_VERSION,
+) -> tuple[str, str]:
+    """Devuelve (system, user) del flujo conversacional para un turno."""
+    context = _session_context(project_metadata, transcript)
+    system = _get_template(version, "system.j2").render(**context)
+    user = _get_template(version, "user.j2").render(**context)
+    return system, user

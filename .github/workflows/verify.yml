@@ -22,12 +22,21 @@ jobs:
       - name: Check required project structure
         run: |
           for f in app/main.py app/config.py app/schemas.py \
+                   app/sessions.py app/attachments.py app/metadata.py \
                    app/prompts/loader.py \
                    app/prompts/estimation/v1/system.j2 \
                    app/prompts/estimation/v1/user.j2 \
                    app/prompts/estimation/v1/examples.j2 \
-                   app/routers/estimations.py app/services/llm_service.py \
+                   app/prompts/estimation/v2/system.j2 \
+                   app/prompts/estimation/v2/user.j2 \
+                   app/prompts/estimation/v2/examples.j2 \
+                   app/routers/estimations.py app/routers/sessions.py \
+                   app/services/llm_service.py \
                    streamlit_app.py tests/prompts/test_estimation_v1.py \
+                   tests/prompts/test_estimation_v2.py \
+                   tests/test_sessions_unit.py tests/test_attachments.py \
+                   tests/test_metadata.py tests/test_sessions_integration.py \
+                   openspec/config.yaml AGENTS.md \
                    .env.example pyproject.toml; do
             test -f "$f" || { echo "Falta $f"; exit 1; }
           done
@@ -42,6 +51,17 @@ jobs:
       - name: Import sanity check
         run: uv run python -c "from app.main import app; print('App importada OK')"
 
+      - name: Set up Node.js (for OpenSpec)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install OpenSpec CLI
+        run: npm install -g @fission-ai/openspec@latest
+
+      - name: Validate OpenSpec specs and changes
+        run: openspec validate --all --strict --no-interactive
+
       - name: Start server and check /health
         env:
           LLM_PROVIDER: anthropic
@@ -55,6 +75,26 @@ jobs:
           done
           curl -sf http://localhost:8000/health
           kill $SERVER_PID
+
+      - name: Smoke test sessions endpoints (sin API key)
+        env:
+          LLM_PROVIDER: anthropic
+          ANTHROPIC_API_KEY: "dummy-key-not-used-for-session-smoke"
+        run: |
+          uv run uvicorn app.main:app --port 8000 &
+          SERVER_PID=$!
+          for i in $(seq 1 20); do
+            curl -sf -o /dev/null http://localhost:8000/health && break
+            sleep 0.5
+          done
+          curl -sf -X POST http://localhost:8000/api/v1/sessions
+          echo
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            "http://localhost:8000/api/v1/sessions/no-existe/estimate" \
+            -F "transcript=hola")
+          kill $SERVER_PID
+          test "$STATUS" = "404" || { echo "Se esperaba 404, llego $STATUS"; exit 1; }
+          echo "Sesiones OK"
 
       # Smoke test opcional del endpoint /estimate: requiere una API key real
       # configurada como secret del repositorio (ANTHROPIC_API_KEY u

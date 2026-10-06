@@ -22,7 +22,7 @@ class EstimationResult:
     provider: str
 
 
-def _call_openai(system: str, user: str, settings: Settings) -> EstimationResult:
+def _call_openai(messages: list[dict], settings: Settings) -> EstimationResult:
     from openai import OpenAI
 
     if not settings.openai_api_key:
@@ -32,10 +32,7 @@ def _call_openai(system: str, user: str, settings: Settings) -> EstimationResult
 
     response = client.chat.completions.create(
         model=settings.openai_model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
         temperature=0.4,
     )
 
@@ -48,7 +45,7 @@ def _call_openai(system: str, user: str, settings: Settings) -> EstimationResult
     )
 
 
-def _call_openrouter(system: str, user: str, settings: Settings) -> EstimationResult:
+def _call_openrouter(messages: list[dict], settings: Settings) -> EstimationResult:
     # OpenRouter expone una API compatible con la de OpenAI, asi que
     # reutilizamos el SDK de OpenAI apuntando a otro base_url. Esto permite
     # acceder a modelos de Anthropic, Google, Meta, etc. con una sola key.
@@ -70,10 +67,7 @@ def _call_openrouter(system: str, user: str, settings: Settings) -> EstimationRe
 
     response = client.chat.completions.create(
         model=settings.openrouter_model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
         temperature=0.4,
         extra_headers=extra_headers or None,
     )
@@ -87,21 +81,20 @@ def _call_openrouter(system: str, user: str, settings: Settings) -> EstimationRe
     )
 
 
-def _call_anthropic(system: str, user: str, settings: Settings) -> EstimationResult:
+def _call_anthropic(messages: list[dict], settings: Settings) -> EstimationResult:
     from anthropic import Anthropic
 
     if not settings.anthropic_api_key:
         raise ValueError("ANTHROPIC_API_KEY no esta configurada en el .env")
 
     client = Anthropic(api_key=settings.anthropic_api_key)
+    system, conversation = _split_system(messages)
 
     response = client.messages.create(
         model=settings.anthropic_model,
         max_tokens=1500,
         system=system,
-        messages=[
-            {"role": "user", "content": user},
-        ],
+        messages=conversation,
     )
 
     estimation_text = "".join(
@@ -115,6 +108,34 @@ def _call_anthropic(system: str, user: str, settings: Settings) -> EstimationRes
     )
 
 
+def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
+    """
+    Separa el/los mensajes `system` del resto de la conversacion. Anthropic
+    recibe el system aparte (parametro `system=`) y no dentro de `messages`.
+    """
+    system_parts = [m["content"] for m in messages if m.get("role") == "system"]
+    conversation = [m for m in messages if m.get("role") != "system"]
+    return "\n\n".join(system_parts), conversation
+
+
+def generate_estimation_messages(messages: list[dict]) -> EstimationResult:
+    """
+    Version multi-mensaje de `generate_estimation`: envia el array `messages`
+    completo (system + historial de turnos). Es la que usa el flujo
+    conversacional, donde no basta con (system, user) porque hay memoria.
+    """
+    settings = get_settings()
+
+    if settings.llm_provider == "openai":
+        return _call_openai(messages, settings)
+    elif settings.llm_provider == "anthropic":
+        return _call_anthropic(messages, settings)
+    elif settings.llm_provider == "openrouter":
+        return _call_openrouter(messages, settings)
+    else:
+        raise ValueError(f"Proveedor LLM no soportado: {settings.llm_provider}")
+
+
 def generate_estimation(system: str, user: str) -> EstimationResult:
     """
     Llama al proveedor configurado en LLM_PROVIDER con dos mensajes
@@ -122,18 +143,15 @@ def generate_estimation(system: str, user: str) -> EstimationResult:
 
     `system` y `user` deben venir ya renderizados por
     `app.prompts.loader.render_estimation_prompt` — este modulo no sabe
-    nada de templates ni de la estructura del prompt.
+    nada de templates ni de la estructura del prompt. Delega en
+    `generate_estimation_messages`.
     """
-    settings = get_settings()
-
-    if settings.llm_provider == "openai":
-        return _call_openai(system, user, settings)
-    elif settings.llm_provider == "anthropic":
-        return _call_anthropic(system, user, settings)
-    elif settings.llm_provider == "openrouter":
-        return _call_openrouter(system, user, settings)
-    else:
-        raise ValueError(f"Proveedor LLM no soportado: {settings.llm_provider}")
+    return generate_estimation_messages(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------

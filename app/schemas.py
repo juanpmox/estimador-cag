@@ -41,3 +41,41 @@ class EstimationRequest(BaseModel):
 class EstimationResponse(BaseModel):
     text: str
     prompt_version: str
+
+
+class ProjectMetadata(BaseModel):
+    """
+    Hechos relevantes del proyecto en curso (memoria de la sesion).
+
+    Vive separado del historial de mensajes: sobrevive a la ventana deslizante
+    y se inyecta en el system prompt via el bloque `<project_metadata>`.
+    """
+
+    project_name: str | None = None
+    assumed_team_size: int | None = None
+    mentioned_technologies: list[str] = Field(default_factory=list)
+    agreed_scope: str | None = None
+
+    def is_empty(self) -> bool:
+        """True si aun no se ha capturado ningun hecho del proyecto."""
+        return (
+            self.project_name is None
+            and self.assumed_team_size is None
+            and not self.mentioned_technologies
+            and self.agreed_scope is None
+        )
+
+
+class SessionCreateResponse(BaseModel):
+    """Respuesta de `POST /api/v1/sessions`."""
+
+    session_id: str
+
+
+class SessionEstimationResponse(BaseModel):
+    """Respuesta de `POST /api/v1/sessions/{session_id}/estimate`."""
+
+    session_id: str
+    text: str
+    prompt_version: str
+    project_metadata: ProjectMetadata

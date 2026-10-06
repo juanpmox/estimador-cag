@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     app_name: str = "Estimador CAG"
     app_env: str = "development"
 
+    # Sesiones conversacionales: numero maximo de turnos (pares user+assistant)
+    # que se conservan en la ventana deslizante del historial por sesion.
+    session_max_turns: int = 6
+
+    # Adjuntos (Camino B): maximo de caracteres de texto extraido por adjunto,
+    # para no reventar el contexto del prompt con un documento enorme.
+    attachment_max_chars: int = 20000
+
     # Cliente (Streamlit): URL base del servicio IA (FastAPI) al que llama.
     api_base_url: str = "http://localhost:8000"
 
